@@ -18,16 +18,32 @@
 # Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 import sys
-import serial
 from time import sleep
 import argparse
 from os.path import basename
+import logging
+import re
 
 
 version = "0.6.3"
 
+def get_file_list():
+    filedesc = re.compile(r'^name:([^, ]*), size:([0-9]+)$')
+    data = writeln("local l = file.list();for k,v in pairs(l) do "
+            "  print('name:'..k..', size:'..v)end\n", True)
+    found = {}
+    for l in data.split('\n'):
+        line = l.strip()
+        m = filedesc.match(line)
+        if not m:
+            logging.debug("Undesired line: '{}'".format(line))
+            continue
+        found[m.group(1)] = {'size': int(m.group(2)), 'name': m.group(1)}
+    return found
 
-def writeln(data, check=1):
+
+
+def serial_writer(data, check=True):
     if s.inWaiting() > 0:
         s.flushInput()
     if len(data) > 0:
@@ -35,35 +51,61 @@ def writeln(data, check=1):
         sys.stdout.write(data.split("\r")[0])
     s.write(data)
     sleep(0.3)
-    if check > 0:
+    if check:
         line = ''
         char = ''
+        alldata = ''
         while char != chr(62):  # '>'
+            alldata += char
             char = s.read(1)
             if char == '':
                 raise Exception('No proper answer from MCU')
             if char == chr(13) or char == chr(10):  # LF or CR
                 if line != '':
                     line = line.strip()
-                    if line+'\r' == data:
+                    if line.strip() == data.strip():
                         sys.stdout.write(" -> ok")
+                    elif line[:4] == "lua:":
+                        sys.stdout.write("\r\n\r\nLua ERROR: %s" % line)
+                        raise Exception('ERROR from Lua interpreter\r\n\r\n')
                     else:
-                        if line[:4] == "lua:":
-                            sys.stdout.write("\r\n\r\nLua ERROR: %s" % line)
-                            raise Exception('ERROR from Lua interpreter\r\n\r\n')
-                        else:
-                            data = data.split("\r")[0]
-                            sys.stdout.write("\r\n\r\nERROR")
-                            sys.stdout.write("\r\n send string    : '%s'" % data)
-                            sys.stdout.write("\r\n expected echo  : '%s'" % data)
-                            sys.stdout.write("\r\n but got answer : '%s'" % line)
-                            sys.stdout.write("\r\n\r\n")
-                            raise Exception('Error sending data to MCU\r\n\r\n')
+                        data = data.split("\r")[0]
+                        sys.stdout.write("\n\nERROR")
+                        sys.stdout.write("\n send string    : '%s'" % data)
+                        sys.stdout.write("\n expected echo  : '%s'" % data)
+                        sys.stdout.write("\n but got answer : '%s'" % line)
+                        sys.stdout.write("\n\n")
+                        raise Exception('Error sending data to MCU\n\n')
                     line = ''
             else:
                 line += char
+        return alldata
     else:
         sys.stdout.write(" -> send without check")
+        return None
+writeln = serial_writer
+
+def telnet_writer(data, check=True):
+    kind_of_newlines = re.compile(r'\n|\r')
+    logging.debug("Sent [[ {} ]]".format(data))
+    s.write(data)
+    sleep(0.3)
+    if not check:
+        sys.stdout.write(" -> send without check")
+
+    response = s.read_until('>')
+    logging.debug("Received [[ {} ]]".format(response))
+    if not '>' in response:
+        raise Exception('> not found')
+    response = response[:response.index('>')]
+    lines = kind_of_newlines.split(response)
+
+    if any((line.strip().startswith('lua:') for line in lines)):
+        logging.error("Received lua errors\n%s" % '\n'.join((line for line in
+            lines if line.strip().startswith('lua:'))))
+        raise Exception('ERROR from Lua interpreter\r\n\r\n')
+    return response
+
 
 
 def writer(data):
@@ -71,19 +113,25 @@ def writer(data):
 
 
 def openserial(args):
-    # Open the selected serial port
-    try:
-        s = serial.Serial(args.port, args.baud)
-    except:
-        sys.stderr.write("Could not open port %s\n" % (args.port))
-        sys.exit(1)
-    if args.verbose:
-        sys.stderr.write("Set timeout %s\r\n" % s.timeout)
-    s.timeout = 3
-    if args.verbose:
-        sys.stderr.write("Set interCharTimeout %s\r\n" % s.interCharTimeout)
-    s.interCharTimeout = 3
-    return s
+    if args.telnet:
+        import telnetlib
+        s = telnetlib.Telnet(args.telnet, args.telnet_port, timeout=20)
+        return s
+    else:
+        import serial
+        # Open the selected serial port
+        try:
+            s = serial.Serial(args.port, args.baud)
+        except:
+            sys.stderr.write("Could not open port %s\n" % (args.port))
+            sys.exit(1)
+        if args.verbose:
+            sys.stderr.write("Set timeout %s\r\n" % s.timeout)
+        s.timeout = 3
+        if args.verbose:
+            sys.stderr.write("Set interCharTimeout %s\r\n" % s.interCharTimeout)
+        s.interCharTimeout = 3
+        return s
 
 
 if __name__ == '__main__':
@@ -91,6 +139,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='ESP8266 Lua script uploader.')
     parser.add_argument('-p', '--port',    default='/dev/ttyUSB0', help='Device name, default /dev/ttyUSB0')
     parser.add_argument('-b', '--baud',    default=9600,           help='Baudrate, default 9600')
+    parser.add_argument('-T', '--telnet', metavar='HOST')
+    parser.add_argument('-P', '--telnet-port', default=23, type=int, metavar='HOSTPORT')
     parser.add_argument('-f', '--src',     default='main.lua',     help='Source file on computer, default main.lua')
     parser.add_argument('-t', '--dest',    default=None,           help='Destination file on MCU, default to source file name')
     parser.add_argument('-c', '--compile', action='store_true',    help='Compile lua to lc after upload')
@@ -101,20 +151,30 @@ if __name__ == '__main__':
     parser.add_argument('-l', '--list',    action='store_true',    help='List files on device')
     parser.add_argument('-w', '--wipe',    action='store_true',    help='Delete all lua/lc files on device.')
     args = parser.parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, filename='luatool.log')
+    else:
+        logging.basicConfig(level=logging.INFO, filename='luatool.log')
+
+    if args.telnet:
+        args.port = None
+        args.baud = None
+        writeln = telnet_writer
+    else:
+        args.telnet_port = None
+        writeln = serial_writer
 
     if args.list:
         s = openserial(args)
-        writeln("local l = file.list();for k,v in pairs(l) do print('name:'..k..', size:'..v)end\r", 0)
-        while True:
-            char = s.read(1)
-            if char == '' or char == chr(62):
-                break
-            sys.stdout.write(char)
+        flist = get_file_list()
+        for filename in flist:
+            print '%(name)s\t(size=%(size)d)' % flist[filename]
         sys.exit(0)
 
     if args.wipe:
         s = openserial(args)
-        writeln("local l = file.list();for k,v in pairs(l) do print(k)end\r", 0)
+        out = writeln("local l = file.list();for k,v in pairs(l) do print(k)end\r",
+                True)
         file_list = []
         fn = ""
         while True:
