@@ -123,8 +123,7 @@ def openserial(args):
         try:
             s = serial.Serial(args.port, args.baud)
         except:
-            sys.stderr.write("Could not open port %s\n" % (args.port))
-            sys.exit(1)
+            raise Exception("Could not open port %s\n" % (args.port))
         if args.verbose:
             sys.stderr.write("Set timeout %s\r\n" % s.timeout)
         s.timeout = 3
@@ -134,65 +133,41 @@ def openserial(args):
         return s
 
 
-if __name__ == '__main__':
+def get_parser():
     # parse arguments or use defaults
     parser = argparse.ArgumentParser(description='ESP8266 Lua script uploader.')
     parser.add_argument('-p', '--port',    default='/dev/ttyUSB0', help='Device name, default /dev/ttyUSB0')
     parser.add_argument('-b', '--baud',    default=9600,           help='Baudrate, default 9600')
     parser.add_argument('-T', '--telnet', metavar='HOST')
     parser.add_argument('-P', '--telnet-port', default=23, type=int, metavar='HOSTPORT')
-    parser.add_argument('-f', '--src',     default='main.lua',     help='Source file on computer, default main.lua')
-    parser.add_argument('-t', '--dest',    default=None,           help='Destination file on MCU, default to source file name')
-    parser.add_argument('-c', '--compile', action='store_true',    help='Compile lua to lc after upload')
-    parser.add_argument('-r', '--restart', action='store_true',    help='Restart MCU after upload')
-    parser.add_argument('-d', '--dofile',  action='store_true',    help='Run the Lua script after upload')
     parser.add_argument('-v', '--verbose', action='store_true',    help="Show progress messages.")
-    parser.add_argument('-a', '--append',  action='store_true',    help='Append source file to destination file.')
-    parser.add_argument('-l', '--list',    action='store_true',    help='List files on device')
-    parser.add_argument('-w', '--wipe',    action='store_true',    help='Delete all lua/lc files on device.')
-    args = parser.parse_args()
-    if args.verbose:
-        logging.basicConfig(level=logging.DEBUG, filename='luatool.log')
-    else:
-        logging.basicConfig(level=logging.INFO, filename='luatool.log')
+    sub = parser.add_subparsers()
+    cmd_list = sub.add_parser('list')
+    cmd_list.set_defaults(func=main_list)
+    cmd_wipe = sub.add_parser('wipe')
+    cmd_wipe.set_defaults(func=main_wipe)
+    cmd_upload = sub.add_parser('upload')
+    cmd_upload.set_defaults(func=main_upload)
+    cmd_upload.add_argument('src', metavar='FILENAME')
+    cmd_upload.add_argument('-t', '--dest')
+    cmd_upload.add_argument('-c', '--compile', action='store_true',    help='Compile lua to lc after upload')
+    cmd_upload.add_argument('-a', '--append',  action='store_true',    help='Append source file to destination file.')
+    cmd_upload.add_argument('-r', '--restart', action='store_true',    help='Restart MCU after upload')
+    cmd_upload.add_argument('-d', '--dofile',  action='store_true',    help='Run the Lua script after upload')
+    return parser
 
-    if args.telnet:
-        args.port = None
-        args.baud = None
-        writeln = telnet_writer
-    else:
-        args.telnet_port = None
-        writeln = serial_writer
 
-    if args.list:
-        s = openserial(args)
-        flist = get_file_list()
-        for filename in flist:
-            print '%(name)s\t(size=%(size)d)' % flist[filename]
-        sys.exit(0)
+def main_list(args):
+    flist = get_file_list()
+    for filename in flist:
+        print '%(name)s\t(size=%(size)d)' % flist[filename]
 
-    if args.wipe:
-        s = openserial(args)
-        out = writeln("local l = file.list();for k,v in pairs(l) do print(k)end\r",
-                True)
-        file_list = []
-        fn = ""
-        while True:
-            char = s.read(1)
-            if char == '' or char == chr(62):
-                break
-            if char not in ['\r', '\n']:
-                fn += char
-            else:
-                if fn:
-                    file_list.append(fn.strip())
-                fn = ''
-        for fn in file_list[1:]:  # first line is the list command sent to device
-            if args.verbose:
-                sys.stderr.write("Delete file {} from device.\r\n".format(fn))
-            writeln("file.remove(\"" + fn + "\")\r")
-        sys.exit(0)
+def main_wipe(args):
+    for fn in get_file_list():
+        logging.debug("Delete file {} from device.\r\n".format(fn))
+        writeln("file.remove(\"" + fn + "\")\r")
 
+def main_upload(args):
     if args.dest is None:
         args.dest = basename(args.src)
 
@@ -201,7 +176,7 @@ if __name__ == '__main__':
         f = open(args.src, "rt")
     except:
         sys.stderr.write("Could not open input file \"%s\"\n" % args.src)
-        sys.exit(1)
+        return 1
 
     # Verify the selected file will not exceed the size of the serial buffer.
     # The size of the buffer is 256. This script does not accept files with
@@ -212,7 +187,7 @@ if __name__ == '__main__':
                              "characters. This exceeds the size of the serial buffer.\n"
                              % args.src)
             f.close()
-            sys.exit(1)
+            return 1
 
     # Go back to the beginning of the file after verifying it has the correct
     # line length
@@ -272,10 +247,31 @@ if __name__ == '__main__':
         writeln("dofile(\"" + args.dest + "\")\r", 0)
 
     # close serial port
-    s.flush()
+    if not args.telnet:
+        s.flush()
     s.close()
 
-    # flush screen
-    sys.stdout.flush()
-    sys.stderr.flush()
     sys.stderr.write("\r\n--->>> All done <<<---\r\n")
+
+
+if __name__ == '__main__':
+    args = get_parser().parse_args()
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, filename='luatool.log')
+    else:
+        logging.basicConfig(level=logging.INFO, filename='luatool.log')
+
+    if args.telnet:
+        args.port = None
+        args.baud = None
+        writeln = telnet_writer
+    else:
+        args.telnet_port = None
+        writeln = serial_writer
+
+    global s
+    s = openserial(args)
+    ret = args.func(args)
+    sys.exit(0 if ret is None else ret)
+
+
