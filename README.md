@@ -7,6 +7,9 @@
 ###Summary
 
 - Allow easy uploading of any Lua-based script into the ESP8266 flash memory with [NodeMcu firmware](https://github.com/nodemcu/nodemcu-firmware)
+- If you have the "lua-telnet" on your ESP, luatool.py can do every operation through telnet, too
+- can upload, list, remove files
+- can run one-shot commands.
 
 ###Other projects
 Another my project for NodeMCU: ESPlorer  Integrated Development Environment (IDE) for ESP8266 developers
