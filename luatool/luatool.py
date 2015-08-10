@@ -100,9 +100,11 @@ def telnet_writer(data, ignored=True):
     for i in xrange(7):
         sleep(i * 0.1)  # at every attempt, we sleep something more
         response = s.read_until('>', 4)
-        logging.debug("Received [[ {} ]]".format(response))
+        logging.debug("Received [[ {} ]]".format(response.replace('\r', '\n')))
         if '>' in response:
             # ok, we have reached it
+            if response.count('>') > 1:
+                logging.warning("Strano, tanti >!")
             break
     else:
         raise Exception('Error in response: > not found')
@@ -160,6 +162,10 @@ def get_parser():
     cmd_remove = sub.add_parser('remove')
     cmd_remove.set_defaults(func=main_remove)
     cmd_remove.add_argument('fname', metavar='FILENAME')
+    cmd_exec = sub.add_parser('exec')
+    cmd_exec.set_defaults(func=main_exec)
+    cmd_exec.add_argument('cmd', metavar='LUA COMMAND',
+                          help='Something like "print(wifi.sta.getip())"')
     cmd_upload = sub.add_parser('upload')
     cmd_upload.set_defaults(func=main_upload)
     cmd_upload.add_argument('src', metavar='FILENAME',
@@ -186,6 +192,10 @@ def main_wipe(args):
 
 def main_remove(args):
     writeln("file.remove(\"" + args.fname + "\")\r")
+
+
+def main_exec(args):
+    print writeln(args.cmd + "\r")
 
 
 def main_upload(args):
@@ -228,7 +238,8 @@ def main_upload(args):
         writeln("file.open(\"" + args.dest + "\", \"w+\")\r")
     logging.info("\r\nStage 3. Start writing data to flash memory...")
     for line in args.src:
-        writer(line.strip())
+        if line:
+            writer(line.strip())
 
     # close both files
     args.src.close()
